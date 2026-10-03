@@ -11,6 +11,8 @@ import com.example.location.BatteryTelemetryManager
 import com.example.location.CompassSensorEngine
 import com.example.location.LocationEngine
 import com.example.network.HybridNetworkManager
+import org.osmdroid.config.Configuration
+import java.io.File
 
 class TrekSyncApplication : Application() {
 
@@ -38,6 +40,13 @@ class TrekSyncApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // Initialize OSMDroid configuration & offline cache directories
+        Configuration.getInstance().load(this, getSharedPreferences("osmdroid_prefs", Context.MODE_PRIVATE))
+        Configuration.getInstance().userAgentValue = packageName
+        val basePath = File(cacheDir, "osmdroid")
+        Configuration.getInstance().osmdroidBasePath = basePath
+        Configuration.getInstance().osmdroidTileCache = File(basePath, "tiles")
 
         createNotificationChannels()
 

@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,28 +17,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.Navigation
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -53,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.ConnectionMode
+import com.example.model.HeartbeatState
 import com.example.model.MemberStatus
 import com.example.model.TeamMember
 import com.example.model.UserLocation
@@ -105,13 +97,12 @@ fun TeamMemberListSheet(
                         color = Color.White
                     )
                     Text(
-                        text = "Real-time telemetry & hybrid peer discovery",
+                        text = "Real-time telemetry & heartbeat watchdog",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray
                     )
                 }
 
-                // Simulate Teammate GPS Movement (helpful for multi-peer demonstration)
                 Button(
                     onClick = onSimulateTeammateMovement,
                     colors = ButtonDefaults.buttonColors(containerColor = TrekBlazeOrange),
@@ -170,8 +161,16 @@ fun MemberItemCard(
     bearingDeg: Int,
     onFocus: () -> Unit
 ) {
-    val memberColor = Color(android.graphics.Color.parseColor(member.colorHex))
+    val rawColor = Color(android.graphics.Color.parseColor(member.colorHex))
     val isDistressed = member.isSosActive || member.status == MemberStatus.SOS_EMERGENCY
+    val isLost = member.heartbeatState == HeartbeatState.LOST_CONTACT
+    val isStale = member.heartbeatState == HeartbeatState.STALE
+
+    val memberColor = when {
+        isLost -> Color.Gray
+        isStale -> rawColor.copy(alpha = 0.85f)
+        else -> rawColor
+    }
 
     Card(
         modifier = Modifier
@@ -179,12 +178,22 @@ fun MemberItemCard(
             .clickable { onFocus() }
             .testTag("member_card_${member.id}"),
         colors = CardDefaults.cardColors(
-            containerColor = if (isDistressed) TrekSosCrimson.copy(alpha = 0.15f) else TrekDarkBackground
+            containerColor = when {
+                isDistressed -> TrekSosCrimson.copy(alpha = 0.15f)
+                isLost -> Color(0xFF1B1B1B)
+                isStale -> TrekAmber.copy(alpha = 0.08f)
+                else -> TrekDarkBackground
+            }
         ),
         shape = RoundedCornerShape(12.dp),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (isDistressed) TrekSosCrimson else TrekDarkSurfaceBorder
+            when {
+                isDistressed -> TrekSosCrimson
+                isLost -> Color.Gray.copy(alpha = 0.6f)
+                isStale -> TrekAmber.copy(alpha = 0.7f)
+                else -> TrekDarkSurfaceBorder
+            }
         )
     ) {
         Row(
@@ -218,7 +227,7 @@ fun MemberItemCard(
                         text = member.name,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = if (isLost) Color.LightGray else Color.White
                     )
                     if (member.isLeader) {
                         Spacer(modifier = Modifier.width(6.dp))
@@ -234,6 +243,28 @@ fun MemberItemCard(
                             )
                         }
                     }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Heartbeat State Badge
+                    val (hbText, hbBg, hbFg) = when (member.heartbeatState) {
+                        HeartbeatState.ACTIVE -> Triple("Active", TrekSignalGreen.copy(alpha = 0.2f), TrekSignalGreen)
+                        HeartbeatState.STALE -> Triple("Stale (${member.secondsSinceLastSeen}s)", TrekAmber.copy(alpha = 0.25f), TrekAmber)
+                        HeartbeatState.LOST_CONTACT -> Triple("Lost (${member.secondsSinceLastSeen}s ago)", TrekSosCrimson.copy(alpha = 0.25f), TrekSosCrimson)
+                    }
+
+                    Surface(
+                        color = hbBg,
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = hbText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = hbFg,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(2.dp))
@@ -242,7 +273,7 @@ fun MemberItemCard(
                     Text(
                         text = "${formatDist(distanceMeters)} away",
                         style = MaterialTheme.typography.bodySmall,
-                        color = TrekSignalGreen,
+                        color = if (isLost) Color.Gray else TrekSignalGreen,
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -256,11 +287,10 @@ fun MemberItemCard(
                 Spacer(modifier = Modifier.height(2.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Sync badge
                     val badgeText = when (member.connectionMode) {
                         ConnectionMode.ONLINE_CLOUD -> "Cloud Relay"
                         ConnectionMode.OFFLINE_P2P_HOTSPOT -> "P2P Hotspot"
-                        ConnectionMode.OFFLINE_P2P_WIFI -> "P2P Wi-Fi"
+                        ConnectionMode.OFFLINE_P2P_WIFI -> "P2P Mesh"
                         ConnectionMode.GPS_STANDALONE -> "Standalone"
                     }
                     Text(
@@ -273,6 +303,15 @@ fun MemberItemCard(
                         text = "• Alt: ${member.location.altitude.toInt()}m",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.Gray
+                    )
+                }
+
+                if (isLost) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Last GPS: ${String.format("%.4f", member.location.latitude)}°, ${String.format("%.4f", member.location.longitude)}°",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TrekAmber
                     )
                 }
             }
@@ -336,7 +375,7 @@ private fun calculateBearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: 
 
 private fun formatDist(meters: Double): String {
     return if (meters >= 1000) {
-        "%.1f km".format(meters / 1000.0)
+        String.format("%.1f km", meters / 1000.0)
     } else {
         "${meters.toInt()} m"
     }

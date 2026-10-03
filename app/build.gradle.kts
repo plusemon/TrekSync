@@ -19,6 +19,8 @@ android {
     versionCode = 1
     versionName = "1.0"
 
+    manifestPlaceholders["MAPS_API_KEY"] = "DEFAULT_MAPS_KEY"
+
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
@@ -114,6 +116,9 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
+  implementation(libs.maps.compose)
+  implementation(libs.play.services.maps)
+  implementation(libs.osmdroid.android)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.play.services.location)

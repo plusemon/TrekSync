@@ -1,12 +1,15 @@
 package com.example.location
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import com.example.model.UserLocation
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -17,7 +20,6 @@ import com.google.android.gms.location.Priority
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlin.math.abs
 
 class LocationEngine(private val context: Context) {
 
@@ -29,6 +31,12 @@ class LocationEngine(private val context: Context) {
     // Dynamic polling interval in milliseconds
     private var currentIntervalMs: Long = 4000L
     private var minDistanceMeters: Float = 2.0f
+
+    private fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
 
     /**
      * Streams high-accuracy GPS coordinates with dynamic adaptive battery rate.
@@ -47,36 +55,49 @@ class LocationEngine(private val context: Context) {
             }
         }
 
-        try {
-            val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, currentIntervalMs)
-                .setMinUpdateIntervalMillis(2000L)
-                .setMinUpdateDistanceMeters(minDistanceMeters)
-                .build()
+        var legacyListener: LocationListener? = null
 
-            fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
-                .addOnFailureListener {
-                    // Fallback to legacy LocationManager if Google Play Services fails
-                    startLegacyLocationListener(locationManager) { loc ->
-                        val userLoc = convertLocation(loc, lastLocation)
-                        lastLocation = loc
-                        trySend(userLoc)
+        if (hasLocationPermission()) {
+            try {
+                val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, currentIntervalMs)
+                    .setMinUpdateIntervalMillis(2000L)
+                    .setMinUpdateDistanceMeters(minDistanceMeters)
+                    .build()
+
+                fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+                    .addOnFailureListener {
+                        if (hasLocationPermission()) {
+                            try {
+                                legacyListener = startLegacyLocationListener(locationManager) { loc ->
+                                    val userLoc = convertLocation(loc, lastLocation)
+                                    lastLocation = loc
+                                    trySend(userLoc)
+                                }
+                            } catch (_: Exception) {}
+                        }
                     }
+            } catch (e: SecurityException) {
+                // Permission not granted or revoked
+            } catch (e: Exception) {
+                if (hasLocationPermission()) {
+                    try {
+                        legacyListener = startLegacyLocationListener(locationManager) { loc ->
+                            val userLoc = convertLocation(loc, lastLocation)
+                            lastLocation = loc
+                            trySend(userLoc)
+                        }
+                    } catch (_: Exception) {}
                 }
-        } catch (e: SecurityException) {
-            // Permission not granted or exception handled
-        } catch (e: Exception) {
-            // GPS fallback
-            startLegacyLocationListener(locationManager) { loc ->
-                val userLoc = convertLocation(loc, lastLocation)
-                lastLocation = loc
-                trySend(userLoc)
             }
         }
 
         awaitClose {
             try {
                 fusedClient.removeLocationUpdates(locationCallback)
-            } catch (ignored: Exception) {}
+            } catch (_: Exception) {}
+            try {
+                legacyListener?.let { locationManager.removeUpdates(it) }
+            } catch (_: Exception) {}
         }
     }
 
@@ -84,34 +105,45 @@ class LocationEngine(private val context: Context) {
     private fun startLegacyLocationListener(
         manager: LocationManager,
         onLocation: (Location) -> Unit
-    ) {
-        val listener = object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                onLocation(location)
-            }
-            @Deprecated("Deprecated in Java")
-            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-            override fun onProviderEnabled(provider: String) {}
-            override fun onProviderDisabled(provider: String) {}
-        }
+    ): LocationListener? {
+        if (!hasLocationPermission()) return null
 
-        if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            manager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                currentIntervalMs,
-                minDistanceMeters,
-                listener,
-                Looper.getMainLooper()
-            )
-        } else if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-            manager.requestLocationUpdates(
-                LocationManager.NETWORK_PROVIDER,
-                currentIntervalMs,
-                minDistanceMeters,
-                listener,
-                Looper.getMainLooper()
-            )
+        try {
+            val listener = object : LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    onLocation(location)
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                override fun onProviderEnabled(provider: String) {}
+                override fun onProviderDisabled(provider: String) {}
+            }
+
+            if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                manager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    currentIntervalMs,
+                    minDistanceMeters,
+                    listener,
+                    Looper.getMainLooper()
+                )
+                return listener
+            } else if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                manager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    currentIntervalMs,
+                    minDistanceMeters,
+                    listener,
+                    Looper.getMainLooper()
+                )
+                return listener
+            }
+        } catch (e: SecurityException) {
+            // Handled gracefully without crash
+        } catch (e: Exception) {
+            // Handled gracefully
         }
+        return null
     }
 
     private fun convertLocation(location: Location, last: Location?): UserLocation {

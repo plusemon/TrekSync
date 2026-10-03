@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.example.MainActivity
@@ -30,6 +32,8 @@ import kotlinx.coroutines.launch
 class TrackingForegroundService : Service() {
 
     companion object {
+        private const val TAG = "TrekSync:Service"
+
         const val ACTION_START = "ACTION_START_TRACKING"
         const val ACTION_STOP = "ACTION_STOP_TRACKING"
         const val ACTION_TRIGGER_SOS = "ACTION_TRIGGER_SOS"
@@ -77,6 +81,9 @@ class TrackingForegroundService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     private var trackingJob: Job? = null
 
+    // System Locks for Zero-Drop Background Execution
+    private var wakeLock: PowerManager.WakeLock? = null
+
     private var tripId: String = "DEMO_TRIP"
     private var tripCode: String = "TREK01"
     private var userId: String = "USER_LEADER"
@@ -91,6 +98,50 @@ class TrackingForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        initWakeLock()
+    }
+
+    private fun initWakeLock() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "TrekSync:TrackingWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+            }
+            Log.d(TAG, "Initialized PARTIAL_WAKE_LOCK.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize WakeLock", e)
+        }
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24-hour safety timeout
+                Log.i(TAG, "Acquired PARTIAL_WAKE_LOCK for background tracking.")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error acquiring WakeLock", e)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.i(TAG, "Released PARTIAL_WAKE_LOCK.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing WakeLock", e)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
@@ -100,11 +151,16 @@ class TrackingForegroundService : Service() {
                 userName = intent.getStringExtra(EXTRA_USER_NAME) ?: userName
                 callSign = intent.getStringExtra(EXTRA_CALL_SIGN) ?: callSign
 
+                acquireWakeLock()
+                val app = applicationContext as TrekSyncApplication
+                app.networkManager.acquireMulticastLock()
+
                 startForegroundWithNotification()
                 startTrackingLoop()
             }
             ACTION_STOP -> {
                 stopTrackingLoop()
+                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -290,6 +346,7 @@ class TrackingForegroundService : Service() {
 
     override fun onDestroy() {
         stopTrackingLoop()
+        releaseWakeLock()
         super.onDestroy()
     }
 

@@ -15,6 +15,12 @@ enum class MemberStatus {
     DISCONNECTED
 }
 
+enum class HeartbeatState {
+    ACTIVE,       // < 30s
+    STALE,        // 30s - 60s
+    LOST_CONTACT  // > 60s
+}
+
 enum class WaypointType(val label: String, val iconName: String) {
     BASECAMP("Basecamp", "camp"),
     WATER_SOURCE("Water Source", "water"),
@@ -22,6 +28,11 @@ enum class WaypointType(val label: String, val iconName: String) {
     SUMMIT("Summit / Peak", "summit"),
     DANGER_ZONE("Hazard / Danger", "warning"),
     RENDEZVOUS("Rendezvous Point", "meet")
+}
+
+enum class MapProviderEngine(val title: String) {
+    OPEN_TOPO_OFFLINE("OpenTopo / OSM (Zero-Key Offline)"),
+    GOOGLE_MAPS("Google Maps SDK (Cloud)")
 }
 
 enum class MapLayerType(val title: String) {
@@ -55,7 +66,37 @@ data class TeamMember(
     val status: MemberStatus = MemberStatus.ACTIVE,
     val isSosActive: Boolean = false,
     val sosMessage: String? = null,
-    val breadcrumbTrail: List<UserLocation> = emptyList()
+    val breadcrumbTrail: List<UserLocation> = emptyList(),
+    val heartbeatState: HeartbeatState = HeartbeatState.ACTIVE,
+    val secondsSinceLastSeen: Long = 0L
+)
+
+data class GpxPoint(
+    val latitude: Double,
+    val longitude: Double,
+    val elevationMeters: Double = 0.0,
+    val timestamp: Long? = null
+)
+
+data class GpxRoute(
+    val name: String,
+    val points: List<GpxPoint>,
+    val waypoints: List<Waypoint> = emptyList(),
+    val totalDistanceMeters: Double = 0.0,
+    val elevationGainMeters: Double = 0.0,
+    val elevationLossMeters: Double = 0.0,
+    val maxAltitudeMeters: Double = 0.0,
+    val minAltitudeMeters: Double = 0.0
+)
+
+data class OffTrailDeviation(
+    val isOffTrail: Boolean = false,
+    val distanceMeters: Double = 0.0,
+    val nearestPoint: GpxPoint? = null,
+    val directionAngleDeg: Float = 0f,
+    val cardinalDirection: String = "N",
+    val remainingTrailDistanceMeters: Double = 0.0,
+    val elevationGainRemainingMeters: Double = 0.0
 )
 
 data class TripSession(
@@ -106,5 +147,7 @@ data class NetworkSyncStats(
     val packetsSent: Long = 0,
     val packetsReceived: Long = 0,
     val localIpAddress: String = "127.0.0.1",
-    val isHotspotActive: Boolean = false
+    val isHotspotActive: Boolean = false,
+    val broadcastAddresses: List<String> = emptyList(),
+    val isMulticastLockHeld: Boolean = false
 )

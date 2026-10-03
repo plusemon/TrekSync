@@ -1,6 +1,11 @@
 package com.example.ui.viewmodel
 
 import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -8,9 +13,14 @@ import com.example.TrekSyncApplication
 import com.example.data.local.TrekRepository
 import com.example.location.BatteryInfo
 import com.example.model.ConnectionMode
+import com.example.model.GpxPoint
+import com.example.model.GpxRoute
+import com.example.model.HeartbeatState
 import com.example.model.MapLayerType
+import com.example.model.MapProviderEngine
 import com.example.model.MemberStatus
 import com.example.model.NetworkSyncStats
+import com.example.model.OffTrailDeviation
 import com.example.model.SosAlert
 import com.example.model.TeamMember
 import com.example.model.TripSession
@@ -20,15 +30,22 @@ import com.example.model.WaypointType
 import com.example.network.PacketType
 import com.example.network.TelemetryPacket
 import com.example.service.TrackingForegroundService
+import com.example.util.GpxParser
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class TrekViewModel(
     private val app: TrekSyncApplication,
@@ -55,7 +72,7 @@ class TrekViewModel(
         UserLocation(
             latitude = 37.7749,
             longitude = -122.4194,
-            altitude = 280.0,
+            altitude = 290.0,
             bearing = 45f,
             speed = 1.2f,
             accuracy = 4.5f
@@ -76,7 +93,16 @@ class TrekViewModel(
     private val _isSosActive = MutableStateFlow(false)
     val isSosActive: StateFlow<Boolean> = _isSosActive.asStateFlow()
 
-    // Map Layer
+    // Map Layer & Engine
+    private val _mapProviderEngine = MutableStateFlow(
+        if (com.example.BuildConfig.MAPS_API_KEY.isNotEmpty() && com.example.BuildConfig.MAPS_API_KEY != "DEFAULT_MAPS_KEY") {
+            MapProviderEngine.GOOGLE_MAPS
+        } else {
+            MapProviderEngine.OPEN_TOPO_OFFLINE
+        }
+    )
+    val mapProviderEngine: StateFlow<MapProviderEngine> = _mapProviderEngine.asStateFlow()
+
     private val _activeMapLayer = MutableStateFlow(MapLayerType.TOPO_CONTOUR)
     val activeMapLayer: StateFlow<MapLayerType> = _activeMapLayer.asStateFlow()
 
@@ -95,10 +121,34 @@ class TrekViewModel(
     // Network & Peer Sync Stats
     val syncStats: StateFlow<NetworkSyncStats> = app.networkManager.syncStats
 
+    // -------------------------------------------------------------
+    // GPX Route & Off-Trail Deviation Engine
+    // -------------------------------------------------------------
+    private val _loadedGpxRoute = MutableStateFlow<GpxRoute?>(null)
+    val loadedGpxRoute: StateFlow<GpxRoute?> = _loadedGpxRoute.asStateFlow()
+
+    private val _offTrailDeviation = MutableStateFlow(OffTrailDeviation())
+    val offTrailDeviation: StateFlow<OffTrailDeviation> = _offTrailDeviation.asStateFlow()
+
+    var offTrailThresholdMeters: Double = 50.0
+
+    private val _gpxImportMessage = MutableStateFlow<String?>(null)
+    val gpxImportMessage: StateFlow<String?> = _gpxImportMessage.asStateFlow()
+
+    // -------------------------------------------------------------
+    // Peer Heartbeat & Lost Contact Watchdog
+    // -------------------------------------------------------------
+    private val _lostContactMembers = MutableStateFlow<List<TeamMember>>(emptyList())
+    val lostContactMembers: StateFlow<List<TeamMember>> = _lostContactMembers.asStateFlow()
+
+    private val notifiedLostMemberIds = mutableSetOf<String>()
+
     init {
         initDefaultTrip()
         startSensorCollection()
         listenToIncomingPackets()
+        startHeartbeatWatchdog()
+        loadSampleGpxRoute()
     }
 
     private fun initDefaultTrip() {
@@ -109,7 +159,7 @@ class TrekViewModel(
                 code = "TREK88",
                 createdAt = System.currentTimeMillis(),
                 leaderId = userId,
-                description = "High altitude mountain trail real-time group sync",
+                description = "High altitude mountain trail real-time group sync with offline GPX guidance",
                 geofenceRadiusMeters = 600f,
                 isActive = true,
                 syncMode = ConnectionMode.ONLINE_CLOUD,
@@ -126,6 +176,7 @@ class TrekViewModel(
     }
 
     private fun initSampleTeammates(tripId: String, center: UserLocation) {
+        val now = System.currentTimeMillis()
         val members = listOf(
             TeamMember(
                 id = "USER_LEADER",
@@ -135,10 +186,12 @@ class TrekViewModel(
                 location = center,
                 batteryPct = 94,
                 isCharging = false,
-                lastSeenTimestamp = System.currentTimeMillis(),
+                lastSeenTimestamp = now,
                 connectionMode = ConnectionMode.ONLINE_CLOUD,
                 isLeader = true,
-                status = MemberStatus.ACTIVE
+                status = MemberStatus.ACTIVE,
+                heartbeatState = HeartbeatState.ACTIVE,
+                secondsSinceLastSeen = 0L
             ),
             TeamMember(
                 id = "MEMBER_02",
@@ -155,10 +208,12 @@ class TrekViewModel(
                 ),
                 batteryPct = 88,
                 isCharging = false,
-                lastSeenTimestamp = System.currentTimeMillis() - 4000L,
+                lastSeenTimestamp = now - 5000L, // 5s ago: Active
                 connectionMode = ConnectionMode.OFFLINE_P2P_HOTSPOT,
                 isLeader = false,
-                status = MemberStatus.ACTIVE
+                status = MemberStatus.ACTIVE,
+                heartbeatState = HeartbeatState.ACTIVE,
+                secondsSinceLastSeen = 5L
             ),
             TeamMember(
                 id = "MEMBER_03",
@@ -175,10 +230,12 @@ class TrekViewModel(
                 ),
                 batteryPct = 76,
                 isCharging = false,
-                lastSeenTimestamp = System.currentTimeMillis() - 8000L,
+                lastSeenTimestamp = now - 38000L, // 38s ago: Stale
                 connectionMode = ConnectionMode.OFFLINE_P2P_WIFI,
                 isLeader = false,
-                status = MemberStatus.ACTIVE
+                status = MemberStatus.ACTIVE,
+                heartbeatState = HeartbeatState.STALE,
+                secondsSinceLastSeen = 38L
             ),
             TeamMember(
                 id = "MEMBER_04",
@@ -190,18 +247,21 @@ class TrekViewModel(
                     longitude = center.longitude - 0.0019,
                     altitude = center.altitude + 42.0,
                     bearing = 310f,
-                    speed = 1.8f,
+                    speed = 0.0f,
                     accuracy = 4f
                 ),
-                batteryPct = 62,
+                batteryPct = 42,
                 isCharging = false,
-                lastSeenTimestamp = System.currentTimeMillis() - 12000L,
-                connectionMode = ConnectionMode.ONLINE_CLOUD,
+                lastSeenTimestamp = now - 72000L, // 72s ago: Lost Contact
+                connectionMode = ConnectionMode.GPS_STANDALONE,
                 isLeader = false,
-                status = MemberStatus.ACTIVE
+                status = MemberStatus.ACTIVE,
+                heartbeatState = HeartbeatState.LOST_CONTACT,
+                secondsSinceLastSeen = 72L
             )
         )
         _teamMembers.value = members
+        updateLostContactList(members)
     }
 
     private fun initSampleWaypoints(tripId: String, center: UserLocation) {
@@ -248,6 +308,7 @@ class TrekViewModel(
             app.locationEngine.getLocationUpdates().collectLatest { loc ->
                 _currentLocation.value = loc
                 updateSelfLocation(loc)
+                recalculateOffTrailDeviation(loc, _loadedGpxRoute.value)
             }
         }
 
@@ -298,6 +359,267 @@ class TrekViewModel(
         }
     }
 
+    // -------------------------------------------------------------
+    // Heartbeat Watchdog Implementation (Runs Every 5s)
+    // -------------------------------------------------------------
+    private fun startHeartbeatWatchdog() {
+        viewModelScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(5000L)
+                val now = System.currentTimeMillis()
+                val currentMembers = _teamMembers.value
+                var hasChanges = false
+                val updatedList = currentMembers.map { member ->
+                    if (member.id == userId) {
+                        member.copy(lastSeenTimestamp = now, heartbeatState = HeartbeatState.ACTIVE, secondsSinceLastSeen = 0L)
+                    } else {
+                        val elapsedSec = ((now - member.lastSeenTimestamp) / 1000L).coerceAtLeast(0L)
+                        val newState = when {
+                            elapsedSec < 30L -> HeartbeatState.ACTIVE
+                            elapsedSec <= 60L -> HeartbeatState.STALE
+                            else -> HeartbeatState.LOST_CONTACT
+                        }
+
+                        if (newState != member.heartbeatState || elapsedSec != member.secondsSinceLastSeen) {
+                            hasChanges = true
+                            member.copy(
+                                heartbeatState = newState,
+                                secondsSinceLastSeen = elapsedSec,
+                                status = if (newState == HeartbeatState.LOST_CONTACT) MemberStatus.DISCONNECTED else member.status
+                            )
+                        } else {
+                            member
+                        }
+                    }
+                }
+
+                if (hasChanges) {
+                    _teamMembers.value = updatedList
+                    updateLostContactList(updatedList)
+                }
+            }
+        }
+    }
+
+    private fun updateLostContactList(members: List<TeamMember>) {
+        val lost = members.filter { it.id != userId && it.heartbeatState == HeartbeatState.LOST_CONTACT }
+        _lostContactMembers.value = lost
+
+        // Trigger alert for newly lost members
+        for (m in lost) {
+            if (!notifiedLostMemberIds.contains(m.id)) {
+                notifiedLostMemberIds.add(m.id)
+                triggerLostContactAlert(m)
+            }
+        }
+
+        // Clean up resolved notifications
+        val lostIds = lost.map { it.id }.toSet()
+        notifiedLostMemberIds.retainAll(lostIds)
+    }
+
+    private fun triggerLostContactAlert(member: TeamMember) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = app.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                val vibrator = vibratorManager?.defaultVibrator
+                vibrator?.vibrate(
+                    VibrationEffect.createWaveform(
+                        longArrayOf(0, 400, 200, 400),
+                        -1
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = app.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator?.vibrate(
+                        VibrationEffect.createWaveform(
+                            longArrayOf(0, 400, 200, 400),
+                            -1
+                        )
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(longArrayOf(0, 400, 200, 400), -1)
+                }
+            }
+        } catch (_: Exception) {
+            // Safe fallback if vibrate permission is constrained in test environment
+        }
+    }
+
+    fun dismissLostContactAlert(memberId: String) {
+        _lostContactMembers.value = _lostContactMembers.value.filterNot { it.id == memberId }
+    }
+
+    // -------------------------------------------------------------
+    // GPX Loading & Off-Trail Computation
+    // -------------------------------------------------------------
+    fun loadGpxFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = GpxParser.parseUri(context, uri)
+            result.onSuccess { route ->
+                _loadedGpxRoute.value = route
+                _gpxImportMessage.value = "Loaded: ${route.name} (${String.format("%.1f", route.totalDistanceMeters / 1000.0)} km, ${route.points.size} pts)"
+                if (route.waypoints.isNotEmpty()) {
+                    _waypoints.value = _waypoints.value + route.waypoints
+                }
+                recalculateOffTrailDeviation(_currentLocation.value, route)
+            }.onFailure { err ->
+                _gpxImportMessage.value = "GPX Import Error: ${err.message ?: "Invalid file"}"
+            }
+        }
+    }
+
+    fun loadGpxString(xmlContent: String) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val result = GpxParser.parseString(xmlContent)
+            result.onSuccess { route ->
+                _loadedGpxRoute.value = route
+                _gpxImportMessage.value = "Loaded trail: ${route.name}"
+                if (route.waypoints.isNotEmpty()) {
+                    _waypoints.value = _waypoints.value + route.waypoints
+                }
+                recalculateOffTrailDeviation(_currentLocation.value, route)
+            }.onFailure { err ->
+                _gpxImportMessage.value = "GPX Parse Error: ${err.message}"
+            }
+        }
+    }
+
+    fun loadSampleGpxRoute() {
+        loadGpxString(GpxParser.SAMPLE_ALPINE_CREST_GPX)
+    }
+
+    fun clearLoadedGpx() {
+        _loadedGpxRoute.value = null
+        _offTrailDeviation.value = OffTrailDeviation()
+        _gpxImportMessage.value = "GPX Route cleared"
+    }
+
+    fun clearGpxMessage() {
+        _gpxImportMessage.value = null
+    }
+
+    /**
+     * Calculates the perpendicular / cross-track deviation between current GPS location
+     * and the nearest segment on the loaded GPX polyline.
+     */
+    private fun recalculateOffTrailDeviation(currentLoc: UserLocation, route: GpxRoute?) {
+        if (route == null || route.points.size < 2) {
+            _offTrailDeviation.value = OffTrailDeviation()
+            return
+        }
+
+        val points = route.points
+        var minDistanceMeters = Double.MAX_VALUE
+        var closestPoint: GpxPoint? = null
+        var closestSegmentIndex = 0
+
+        val userLat = currentLoc.latitude
+        val userLon = currentLoc.longitude
+        val cosLat = cos(Math.toRadians(userLat))
+
+        for (i in 0 until points.size - 1) {
+            val p1 = points[i]
+            val p2 = points[i + 1]
+
+            // Convert to local metric coordinates
+            val x1 = Math.toRadians(p1.longitude - userLon) * 6371000.0 * cosLat
+            val y1 = Math.toRadians(p1.latitude - userLat) * 6371000.0
+            val x2 = Math.toRadians(p2.longitude - userLon) * 6371000.0 * cosLat
+            val y2 = Math.toRadians(p2.latitude - userLat) * 6371000.0
+
+            val dx = x2 - x1
+            val dy = y2 - y1
+            val segLenSq = dx * dx + dy * dy
+
+            val t = if (segLenSq > 0.0) {
+                ((-x1 * dx - y1 * dy) / segLenSq).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+
+            val projX = x1 + t * dx
+            val projY = y1 + t * dy
+            val dist = sqrt(projX * projX + projY * projY)
+
+            if (dist < minDistanceMeters) {
+                minDistanceMeters = dist
+                closestSegmentIndex = i
+                val projLat = p1.latitude + t * (p2.latitude - p1.latitude)
+                val projLon = p1.longitude + t * (p2.longitude - p1.longitude)
+                val projEle = p1.elevationMeters + t * (p2.elevationMeters - p1.elevationMeters)
+                closestPoint = GpxPoint(projLat, projLon, projEle)
+            }
+        }
+
+        if (closestPoint != null) {
+            // Bearing from trail nearest point to user location (indicates where the user strayed)
+            val bearingDeg = calculateBearing(
+                closestPoint.latitude, closestPoint.longitude,
+                userLat, userLon
+            )
+            val cardinal = cardinalFromBearing(bearingDeg)
+
+            // Compute remaining trail distance from closest segment to trail finish
+            var remainingDist = 0.0
+            var remainingGain = 0.0
+            remainingDist += GpxParser.haversineDistanceMeters(
+                closestPoint.latitude, closestPoint.longitude,
+                points[closestSegmentIndex + 1].latitude, points[closestSegmentIndex + 1].longitude
+            )
+
+            for (k in (closestSegmentIndex + 1) until points.size - 1) {
+                val pA = points[k]
+                val pB = points[k + 1]
+                remainingDist += GpxParser.haversineDistanceMeters(pA.latitude, pA.longitude, pB.latitude, pB.longitude)
+                if (pB.elevationMeters > pA.elevationMeters) {
+                    remainingGain += (pB.elevationMeters - pA.elevationMeters)
+                }
+            }
+
+            // Sanity bounds: if distance > 10km (10000m), user hasn't arrived at the trailhead yet
+            val isFarFromTrailhead = minDistanceMeters > 10000.0
+            val isOff = minDistanceMeters > offTrailThresholdMeters && !isFarFromTrailhead
+
+            _offTrailDeviation.value = OffTrailDeviation(
+                isOffTrail = isOff,
+                distanceMeters = minDistanceMeters,
+                nearestPoint = closestPoint,
+                directionAngleDeg = bearingDeg.toFloat(),
+                cardinalDirection = cardinal,
+                remainingTrailDistanceMeters = remainingDist,
+                elevationGainRemainingMeters = remainingGain
+            )
+        }
+    }
+
+    private fun calculateBearing(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val phi1 = Math.toRadians(lat1)
+        val phi2 = Math.toRadians(lat2)
+        val deltaLambda = Math.toRadians(lon2 - lon1)
+        val y = sin(deltaLambda) * cos(phi2)
+        val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(deltaLambda)
+        var theta = Math.toDegrees(atan2(y, x))
+        if (theta < 0) theta += 360.0
+        return theta
+    }
+
+    private fun cardinalFromBearing(deg: Double): String {
+        return when (deg.toInt()) {
+            in 0..22, in 338..360 -> "North"
+            in 23..67 -> "Northeast"
+            in 68..112 -> "East"
+            in 113..157 -> "Southeast"
+            in 158..202 -> "South"
+            in 203..247 -> "Southwest"
+            in 248..292 -> "West"
+            else -> "Northwest"
+        }
+    }
+
     private fun updateSelfLocation(loc: UserLocation) {
         val currentList = _teamMembers.value.toMutableList()
         val idx = currentList.indexOfFirst { it.id == userId }
@@ -313,7 +635,9 @@ class TrekViewModel(
             connectionMode = app.networkManager.connectionMode.value,
             isLeader = true,
             status = if (_isSosActive.value) MemberStatus.SOS_EMERGENCY else MemberStatus.ACTIVE,
-            isSosActive = _isSosActive.value
+            isSosActive = _isSosActive.value,
+            heartbeatState = HeartbeatState.ACTIVE,
+            secondsSinceLastSeen = 0L
         )
 
         if (idx >= 0) {
@@ -347,7 +671,9 @@ class TrekViewModel(
                 lastSeenTimestamp = packet.timestamp,
                 status = packet.status,
                 isSosActive = packet.type == PacketType.SOS_ALERT || packet.status == MemberStatus.SOS_EMERGENCY,
-                breadcrumbTrail = if (newTrail.size > 20) newTrail.takeLast(20) else newTrail
+                breadcrumbTrail = if (newTrail.size > 20) newTrail.takeLast(20) else newTrail,
+                heartbeatState = HeartbeatState.ACTIVE,
+                secondsSinceLastSeen = 0L
             )
         } else {
             TeamMember(
@@ -363,7 +689,9 @@ class TrekViewModel(
                 isLeader = false,
                 status = packet.status,
                 isSosActive = packet.type == PacketType.SOS_ALERT,
-                breadcrumbTrail = listOf(memberLoc)
+                breadcrumbTrail = listOf(memberLoc),
+                heartbeatState = HeartbeatState.ACTIVE,
+                secondsSinceLastSeen = 0L
             )
         }
 
@@ -373,19 +701,26 @@ class TrekViewModel(
             currentList.add(updated)
         }
         _teamMembers.value = currentList
+        updateLostContactList(currentList)
     }
 
     fun startForegroundTracking(context: Context) {
+        val hasFine = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val hasCoarse = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) return
+
         val trip = activeTrip.value ?: return
-        TrackingForegroundService.startService(
-            context = context,
-            tripId = trip.id,
-            tripCode = trip.code,
-            userId = userId,
-            userName = userName,
-            callSign = userCallSign
-        )
-        _isTrackingActive.value = true
+        try {
+            TrackingForegroundService.startService(
+                context = context,
+                tripId = trip.id,
+                tripCode = trip.code,
+                userId = userId,
+                userName = userName,
+                callSign = userCallSign
+            )
+            _isTrackingActive.value = true
+        } catch (_: Exception) {}
     }
 
     fun stopForegroundTracking(context: Context) {
@@ -496,7 +831,6 @@ class TrekViewModel(
             repository.addWaypoint(wp)
             _waypoints.value = listOf(wp) + _waypoints.value
 
-            // Broadcast to all team members over P2P mesh and cloud
             val packet = TelemetryPacket(
                 type = PacketType.WAYPOINT_SHARED,
                 tripCode = activeTrip.value?.code ?: "",
@@ -522,6 +856,10 @@ class TrekViewModel(
 
     fun switchMapLayer(layer: MapLayerType) {
         _activeMapLayer.value = layer
+    }
+
+    fun switchMapProvider(engine: MapProviderEngine) {
+        _mapProviderEngine.value = engine
     }
 
     /**

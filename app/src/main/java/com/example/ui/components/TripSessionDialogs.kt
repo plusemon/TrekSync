@@ -57,6 +57,11 @@ import com.example.model.ConnectionMode
 import com.example.model.NetworkSyncStats
 import com.example.model.TripSession
 import com.example.model.WaypointType
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Power
+import androidx.compose.ui.platform.LocalContext
+import com.example.util.BatteryOptimizationHelper
 import com.example.ui.theme.TrekAlpineCyan
 import com.example.ui.theme.TrekAmber
 import com.example.ui.theme.TrekBlazeOrange
@@ -418,6 +423,11 @@ fun NetworkDiagnosticsDialog(
     syncStats: NetworkSyncStats,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    var isBatteryOptIgnored by remember {
+        mutableStateOf(BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context))
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = TrekDarkSurface,
@@ -472,8 +482,33 @@ fun NetworkDiagnosticsDialog(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "UDP Multicast Port:", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
-                            Text(text = "45454 (239.255.42.99)", color = TrekAmber, fontWeight = FontWeight.Bold)
+                            Text(text = "Subnet Broadcasts:", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = if (syncStats.broadcastAddresses.isNotEmpty()) syncStats.broadcastAddresses.joinToString(", ") else "255.255.255.255",
+                                color = TrekAlpineCyan,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Multicast Group:", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
+                            Text(text = "239.255.42.99:45454", color = TrekAmber, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Multicast Lock:", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = if (syncStats.isMulticastLockHeld) "HELD (Radio Active)" else "STANDBY",
+                                color = if (syncStats.isMulticastLockHeld) TrekSignalGreen else Color.Gray,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Row(
@@ -492,6 +527,48 @@ fun NetworkDiagnosticsDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                // Battery Optimization Section
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = TrekDarkBackground)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Background Doze Protection",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = if (isBatteryOptIgnored) "Exempted (Zero Throttling)" else "Not Exempted (May Throttle)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isBatteryOptIgnored) TrekSignalGreen else TrekAmber
+                            )
+                        }
+                        if (!isBatteryOptIgnored) {
+                            Button(
+                                onClick = {
+                                    BatteryOptimizationHelper.requestIgnoreBatteryOptimizations(context)
+                                    isBatteryOptIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = TrekAmber),
+                                modifier = Modifier.padding(start = 8.dp)
+                            ) {
+                                Text("Exempt", color = TrekDarkBackground, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
                 Text(
                     text = "💡 How Zero-Internet Tracking Works:",
                     style = MaterialTheme.typography.titleSmall,
@@ -500,7 +577,7 @@ fun NetworkDiagnosticsDialog(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "When internet drops in the wild, TrekSync instantly activates local UDP broadcast/multicast packets. Any devices on the same Wi-Fi router or Portable Hotspot continuously exchange high-accuracy GPS coordinates in real time!",
+                    text = "When internet drops in the wild, TrekSync transmits dual-layer subnet broadcast and UDP multicast packets over Wi-Fi Hotspots or local LAN. Hardware MulticastLock and WakeLocks ensure 100% reliable telemetry even with the screen locked!",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.LightGray
                 )
@@ -516,3 +593,201 @@ fun NetworkDiagnosticsDialog(
         }
     )
 }
+
+/**
+ * Offline Map Pre-Caching Dialog for Remote Backcountry Expeditions.
+ */
+@Composable
+fun OfflineMapCacheDialog(
+    mapView: org.osmdroid.views.MapView?,
+    centerLatitude: Double,
+    centerLongitude: Double,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val mapManager = remember { com.example.util.OfflineMapManager.getInstance(context) }
+    var radiusKm by remember { mutableFloatStateOf(10f) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf(0) }
+    var progressStatus by remember { mutableStateOf("Ready to pre-cache tiles for zero-internet expeditions.") }
+    var isComplete by remember { mutableStateOf(false) }
+    var estimatedTiles by remember {
+        mutableStateOf(
+            if (mapView != null) {
+                val bbox = mapManager.createBoundingBox(centerLatitude, centerLongitude, 10.0)
+                mapManager.estimateTileCount(mapView, bbox, 12, 16)
+            } else 240
+        )
+    }
+    val storageEstimateMb = remember(estimatedTiles) {
+        mapManager.estimateStorageSizeMb(estimatedTiles)
+    }
+
+    AlertDialog(
+        onDismissRequest = {
+            if (!isDownloading) onDismiss()
+        },
+        containerColor = TrekDarkSurface,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.AddLocation,
+                    contentDescription = null,
+                    tint = TrekAlpineCyan
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Offline Map Tile Cache",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Pre-download detailed OpenStreetMap topographic tiles for your expedition bounding box before departing into zero-connectivity terrain.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.LightGray
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = TrekDarkBackground)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Center GPS:", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                            Text(text = "%.4f, %.4f".format(centerLatitude, centerLongitude), color = TrekSignalGreen, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Zoom Range:", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                            Text(text = "L12 - L16 (Topographic)", color = TrekAlpineCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Estimated Tiles:", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                            Text(text = "$estimatedTiles tiles (~${String.format("%.1f", storageEstimateMb)} MB)", color = TrekBlazeOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                if (!isDownloading && !isComplete) {
+                    Text(
+                        text = "Expedition Cache Radius: ${radiusKm.toInt()} km",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TrekAlpineCyan,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Slider(
+                        value = radiusKm,
+                        onValueChange = {
+                            radiusKm = it
+                            if (mapView != null) {
+                                val bbox = mapManager.createBoundingBox(centerLatitude, centerLongitude, it.toDouble())
+                                estimatedTiles = mapManager.estimateTileCount(mapView, bbox, 12, 16)
+                            }
+                        },
+                        valueRange = 5f..30f,
+                        steps = 5,
+                        colors = SliderDefaults.colors(
+                            thumbColor = TrekAlpineCyan,
+                            activeTrackColor = TrekAlpineCyan,
+                            inactiveTrackColor = TrekDarkSurfaceBorder
+                        )
+                    )
+                }
+
+                if (isDownloading) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { downloadProgress / 100f },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = TrekAlpineCyan,
+                        trackColor = TrekDarkSurfaceBorder
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                Text(
+                    text = progressStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isComplete) TrekSignalGreen else Color.Gray
+                )
+            }
+        },
+        confirmButton = {
+            if (!isDownloading && !isComplete) {
+                Button(
+                    onClick = {
+                        if (mapView != null) {
+                            isDownloading = true
+                            progressStatus = "Downloading map tiles for offline expedition..."
+                            val bbox = mapManager.createBoundingBox(centerLatitude, centerLongitude, radiusKm.toDouble())
+                            mapManager.preCacheBoundingBox(
+                                mapView = mapView,
+                                boundingBox = bbox,
+                                minZoom = 12,
+                                maxZoom = 16,
+                                onComplete = { success ->
+                                    isDownloading = false
+                                    if (success) {
+                                        isComplete = true
+                                        progressStatus = "✅ Successfully cached tiles! Ready for offline expedition."
+                                    } else {
+                                        progressStatus = "⚠️ Pre-caching failed or was cancelled."
+                                    }
+                                }
+                            )
+                        } else {
+                            progressStatus = "Map instance initializing. Try again in a moment."
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TrekAlpineCyan),
+                    modifier = Modifier.testTag("start_offline_cache_btn")
+                ) {
+                    Text("Download Offline Map", color = TrekDarkBackground, fontWeight = FontWeight.Bold)
+                }
+            } else if (isComplete) {
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = TrekSignalGreen)
+                ) {
+                    Text("Done", color = TrekDarkBackground, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            if (isDownloading) {
+                OutlinedButton(
+                    onClick = {
+                        mapManager.cancelActivePreCache()
+                        isDownloading = false
+                        progressStatus = "Cancelled tile download."
+                    }
+                ) {
+                    Text("Cancel Download", color = Color.White)
+                }
+            } else {
+                OutlinedButton(onClick = onDismiss) {
+                    Text("Cancel", color = Color.White)
+                }
+            }
+        }
+    )
+}
+
