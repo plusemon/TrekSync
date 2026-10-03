@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Radar / Signal Pulse Rings -->
+    <path
+        android:pathData="M54,26 A28,28 0 1,0 54,82 A28,28 0 1,0 54,26"
+        android:strokeWidth="1.5"
+        android:strokeColor="#4000E676"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,32 A22,22 0 1,0 54,76 A22,22 0 1,0 54,32"
+        android:strokeWidth="1.5"
+        android:strokeColor="#8000E676"
+        android:fillColor="#00000000" />
+
+    <!-- Mountain Silhouette -->
+    <path
+        android:pathData="M30,76 L46,50 L56,64 L68,44 L82,76 Z"
+        android:fillColor="#244D38" />
+
+    <!-- GPS Trail Pin Marker -->
+    <path
+        android:pathData="M54,30 C46.27,30 40,36.27 40,44 C40,55 54,73 54,73 C54,73 68,55 68,44 C68,36.27 61.73,30 54,30 Z"
+        android:fillColor="#00E676" />
+    <path
+        android:pathData="M54,38 A6,6 0 1,0 54,50 A6,6 0 1,0 54,38"
+        android:fillColor="#081A10" />
+
+    <!-- Direction Arrow -->
+    <path
+        android:pathData="M54,20 L60,28 L48,28 Z"
+        android:fillColor="#FF6D00" />
+</vector>

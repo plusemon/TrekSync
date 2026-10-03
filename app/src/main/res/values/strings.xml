@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">TrekSync</string>
+    <string name="notification_channel_tracking_name">Group Tracking Service</string>
+    <string name="notification_channel_tracking_desc">Keeps your real-time group GPS location synchronized with teammates.</string>
+    <string name="notification_channel_sos_name">Emergency SOS Alerts</string>
+    <string name="notification_channel_sos_desc">Critical emergency alerts and beacon broadcasts from team members.</string>
+</resources>

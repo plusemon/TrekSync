@@ -1,0 +1,7 @@
+{
+  "name": "TrekSync",
+  "description": "Hybrid real-time group location tracker with online cloud synchronization, zero-internet offline P2P mesh discovery, battery telemetry, and outdoor interactive maps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
